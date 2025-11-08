@@ -1,0 +1,10 @@
+﻿{
+  "Name": "AnimalPersonalities",
+  "Author": "Miihau",
+  "Version": "0.1.0",
+  "Description": "RAAAA AnimalPersonalities",
+  "UniqueID": "Miihau.AnimalPersonalities",
+  "EntryDll": "AnimalPersonalities.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}
