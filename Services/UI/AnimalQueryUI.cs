@@ -21,8 +21,7 @@ namespace AnimalPersonalities.Services.UI
         {
             if (Game1.activeClickableMenu is not AnimalQueryMenu menu)
                 return;
-
-            // only draw on the main info view (not while placing/moving)
+          
             if (menu.movingAnimal || Game1.globalFade)
                 return;
 
@@ -33,7 +32,6 @@ namespace AnimalPersonalities.Services.UI
             if (!animal.modData.TryGetValue(_personalityKey, out string personality))
                 return;
 
-            // position inside the window
             Vector2 pos = new(
                 menu.xPositionOnScreen + AnimalQueryMenu.width / 8,
                 menu.yPositionOnScreen + AnimalQueryMenu.height - 80
@@ -45,7 +43,7 @@ namespace AnimalPersonalities.Services.UI
             //e.SpriteBatch.DrawString(Game1.smallFont, text, pos, Game1.textColor);
             Utility.drawTextWithShadow(e.SpriteBatch, text, Game1.smallFont, pos, Game1.textColor);
 
-            // hover tooltip for locked state
+            // hover tooltip
             if (!canSee)
             {
                 var size = Game1.smallFont.MeasureString(text);
@@ -60,7 +58,7 @@ namespace AnimalPersonalities.Services.UI
                 }
             }
 
-            // draw the mouse AGAIN so it's above text
+            // draw the mouse so it's above text
             menu.drawMouse(e.SpriteBatch);
         }
 

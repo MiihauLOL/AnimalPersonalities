@@ -23,7 +23,8 @@ namespace AnimalPersonalities
         private PersonalityAssigner Assigner;
         private AnimalQueryUI QueryUI;
         private AnimalPageUI AnimalListUI;
-        
+        private Debug.DebugPersonalityCycler _debugCycler;
+        private HopArcService _hopArc;
 
         // handlers
         private readonly Dictionary<Personality, IAnimalPersonalityHandler> Handlers =
@@ -41,16 +42,18 @@ namespace AnimalPersonalities
             Tiles = new TileService();
             GreedyMorning = new MorningGreedyService();
             Assigner = new PersonalityAssigner();
-            QueryUI = new AnimalPersonalities.Services.UI.AnimalQueryUI(PersonalityKey, Helper);
-            AnimalListUI = new AnimalPersonalities.Services.UI.AnimalPageUI(PersonalityKey, Helper);
+            QueryUI = new AnimalQueryUI(PersonalityKey, Helper);
+            AnimalListUI = new AnimalPageUI(PersonalityKey, Helper);
+            _debugCycler = new Debug.DebugPersonalityCycler(Helper, Monitor, PersonalityKey);
+            _hopArc = new HopArcService(helper, Monitor);
 
-
-            // handlers (inject services as needed)
+            // handlers 
             Handlers[Personality.Lazy] = new LazyHandler();
             Handlers[Personality.Energetic] = new EnergeticHandler();
-            Handlers[Personality.Mischievous] = new MischievousHandler(Tiles);
+            Handlers[Personality.Mischievous] = new MischievousHandler(Tiles, Monitor, _hopArc);
             Handlers[Personality.Affectionate] = new AffectionateHandler(Emotes);
             Handlers[Personality.Greedy] = new GreedyHandler(Tiles);
+            
 
             helper.Events.GameLoop.DayStarted += OnDayStarted;
             helper.Events.GameLoop.UpdateTicked += OnUpdateTicked;
@@ -96,7 +99,7 @@ namespace AnimalPersonalities
 
         private void OnUpdateTicked(object sender, UpdateTickedEventArgs e)
         {
-            if (!Context.IsWorldReady || !e.IsMultipleOf(300)) // every 5 seconds
+            if (!Context.IsWorldReady || !e.IsMultipleOf(120)) // every 2s
                 return;
 
             var ctx = new AIContext
@@ -110,26 +113,28 @@ namespace AnimalPersonalities
                 Tiles = Tiles
             };
 
-            foreach (var b in ctx.Farm.buildings)
+            
+            Utility.ForEachLocation(loc =>
             {
-                if (b.indoors.Value is not AnimalHouse house) continue;
-
-                foreach (var animal in house.animals.Values)
+                var dict = loc?.animals;
+                if (dict != null && dict.Count() > 0)
                 {
-                    if (!animal.modData.TryGetValue(PersonalityKey, out string pStr)) continue;
-                    if (!Enum.TryParse(pStr, out Personality p)) continue;
-
-                    if (!Handlers.TryGetValue(p, out var handler)) continue;
-
-                    // Build feasible actions first; if any, randomly pick ONE and try it.
-                    var actions = handler.BuildFeasibleActions(animal, ctx);
-                    if (actions.Count > 0)
+                    foreach (var animal in dict.Values.ToList())
                     {
-                        var chosen = actions[ctx.Rng.Next(actions.Count)];
-                        _ = chosen(); // each action returns bool to indicate it fired (not used now)
+                        if (!animal.modData.TryGetValue(PersonalityKey, out string pStr)) continue;
+                        if (!Enum.TryParse(pStr, out Personality p)) continue;
+                        if (!Handlers.TryGetValue(p, out var handler)) continue;
+
+                        var actions = handler.BuildFeasibleActions(animal, ctx);
+                        if (actions.Count > 0)
+                        {
+                            var chosen = actions[ctx.Rng.Next(actions.Count)];
+                            _ = chosen();
+                        }
                     }
                 }
-            }
+                return true;
+            });
         }
     }
 }

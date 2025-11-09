@@ -38,7 +38,7 @@ namespace AnimalPersonalities.Services.UI
                 if (entry.Animal is not FarmAnimal fa)
                     continue; // pets/horses: no label
 
-                // --- same center math AnimalPage uses for the name ---
+                //same center math AnimalPage uses for the name
                 float nameCenterX =
                     page.xPositionOnScreen
                     + IClickableMenu.borderWidth * 3 / 2
@@ -55,13 +55,12 @@ namespace AnimalPersonalities.Services.UI
                                 ? $"Personality: {p}"
                                 : "Personality: ???";
 
-                // centered under the name; +42f looked perfect for you
                 float textWidth = Game1.smallFont.MeasureString(text).X;
                 Vector2 pos = new(nameCenterX - textWidth / 2f, nameY + 42f);
 
                 e.SpriteBatch.DrawString(Game1.smallFont, text, pos, Color.Black);
 
-                // hover hint for locked state
+                // hover hint
                 if (!canSee)
                 {
                     int mx = Game1.getMouseX();

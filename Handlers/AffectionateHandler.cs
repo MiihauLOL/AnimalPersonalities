@@ -1,7 +1,6 @@
 ﻿using AnimalPersonalities.Services;
 using Microsoft.Xna.Framework;
 using StardewValley;
-using StardewValley.Characters;
 using StardewValley.Pathfinding;
 using System;
 using System.Collections.Generic;
@@ -11,54 +10,74 @@ namespace AnimalPersonalities.Handlers
 {
     public class AffectionateHandler : IAnimalPersonalityHandler
     {
-        private readonly EmoteCooldownService Emotes;
-        public AffectionateHandler(EmoteCooldownService emotes) => Emotes = emotes;
+        private readonly EmoteCooldownService _emotes;
+        public AffectionateHandler(EmoteCooldownService emotes) => _emotes = emotes;
+
+        // simple anti-spam: one action per ~10s per animal
+        private readonly Dictionary<long, int> _cooldown = new();
+        private static bool CooldownOK(Dictionary<long, int> cd, long id, int minTicks)
+        {
+            int now = Game1.ticks;
+            if (cd.TryGetValue(id, out var last) && now - last < minTicks) return false;
+            cd[id] = now; return true;
+        }
 
         public List<Func<bool>> BuildFeasibleActions(FarmAnimal a, AIContext ctx)
         {
-            var list = new List<Func<bool>>();
+            var actions = new List<Func<bool>>();
+            var farmer = Game1.player;
 
-            var farmer = StardewValley.Game1.player;
-            Vector2 aPos = a.TilePoint.ToVector2();
-            Vector2 fPos = farmer.TilePoint.ToVector2();
+            // 1) run to farmer (only if feasible)
+            if (a.currentLocation == farmer.currentLocation)
+            {
+                var aTile = a.TilePoint.ToVector2();
+                var fTile = farmer.TilePoint.ToVector2();
+                if (Vector2.Distance(aTile, fTile) <= 8f)
+                    actions.Add(() => TryRunToFarmer(a, ctx));
+            }
 
-            // farmer nearby?
-            if (Vector2.Distance(aPos, fPos) < 8f)
-                list.Add(() => TryRunToFarmer(a, ctx));
-
-            // buddy nearby?
+            // 2) buddy hangout (only if an affectionate buddy is nearby)
+            var meTile = a.TilePoint.ToVector2();
             var buddy = ctx.Farm.getAllFarmAnimals()
-                .Where(other =>
-                    other != a &&
-                    other.modData.TryGetValue(ctx.PersonalityKey, out string p) && p == "Affectionate" &&
-                    Vector2.Distance(other.TilePoint.ToVector2(), aPos) < 8f)
-                .OrderBy(other => Vector2.Distance(other.TilePoint.ToVector2(), aPos))
+                .Where(o => o != a
+                            && o.currentLocation == a.currentLocation
+                            && o.modData.TryGetValue(ctx.PersonalityKey, out var p) && p == "Affectionate"
+                            && Vector2.Distance(o.TilePoint.ToVector2(), meTile) <= 8f)
+                .OrderBy(o => Vector2.Distance(o.TilePoint.ToVector2(), meTile))
                 .FirstOrDefault();
 
             if (buddy != null)
-                list.Add(() => TryBuddyHangout(a, buddy, ctx));
+                actions.Add(() => TryBuddyHangout(a, buddy, ctx));
 
-            // passive friendship always feasible
-            list.Add(() => TryFriendshipTick(a, ctx));
+            // 3) tiny passive friendship nudge (always feasible)
+            actions.Add(() => TryFriendshipTick(a, ctx));
 
-            return list;
+            return actions;
         }
 
         private bool TryRunToFarmer(FarmAnimal a, AIContext ctx)
         {
-            if (ctx.Rng.NextDouble() >= 0.25) return false;
+            // feasibility already checked; now roll odds
+            if (!CooldownOK(_cooldown, a.myID.Value, 600)) return false; // ~10s
+            if (ctx.Rng.NextDouble() >= 0.30) return false;              // 30%
 
-            var farmer = StardewValley.Game1.player;
-            a.speed = 3;
-            a.controller = new PathFindController(a, farmer.currentLocation, farmer.TilePoint, 2);
+            var farmer = Game1.player;
+            if (a.currentLocation != farmer.currentLocation) return false;
 
-            if (Emotes.CanDoEmote(a))
+            a.speed = Math.Max(a.speed, 3);
+            if (FarmAnimal.NumPathfindingThisTick < FarmAnimal.MaxPathfindingPerTick)
             {
-                a.doEmote(12);
-                StardewValley.Game1.playSound("smallSelect");
-                Emotes.SetEmote(a);
+                FarmAnimal.NumPathfindingThisTick++;
+                a.controller = new PathFindController(a, a.currentLocation, farmer.TilePoint, 2);
             }
 
+            if (_emotes.CanDoEmote(a))
+            {
+                a.doEmote(20); // heart
+                _emotes.SetEmote(a);
+            }
+
+            // restore speed after a short dash
             DelayedAction.functionAfterDelay(() =>
             {
                 if (a != null) a.speed = 2;
@@ -69,28 +88,31 @@ namespace AnimalPersonalities.Handlers
 
         private bool TryBuddyHangout(FarmAnimal a, FarmAnimal buddy, AIContext ctx)
         {
-            double chance = 0.05;
+            if (!CooldownOK(_cooldown, a.myID.Value, 600)) return false; // ~10s
+
+            // Base chance & boosts (same home/type)
+            double chance = 0.08; // base
             if (buddy.home?.buildingType.Value == a.home?.buildingType.Value) chance += 0.10;
-            if (buddy.type.Value == a.type.Value) chance += 0.15;
+            if (buddy.type.Value == a.type.Value) chance += 0.12;
 
             if (ctx.Rng.NextDouble() >= chance) return false;
 
-            a.speed = 2;
-            a.controller = new PathFindController(a, a.currentLocation, buddy.TilePoint, 2);
+            if (FarmAnimal.NumPathfindingThisTick < FarmAnimal.MaxPathfindingPerTick)
+            {
+                FarmAnimal.NumPathfindingThisTick++;
+                a.speed = 2;
+                a.controller = new PathFindController(a, a.currentLocation, buddy.TilePoint, 2);
+            }
 
+            // small simultaneous heart when they meet
             DelayedAction.functionAfterDelay(() =>
             {
                 if (Vector2.Distance(a.TilePoint.ToVector2(), buddy.TilePoint.ToVector2()) <= 2f)
                 {
-                    if (Emotes.CanDoEmote(a) && Emotes.CanDoEmote(buddy))
-                    {
-                        a.doEmote(12);
-                        buddy.doEmote(12);
-                        Emotes.SetEmote(a);
-                        Emotes.SetEmote(buddy);
-                    }
+                    if (_emotes.CanDoEmote(a)) { a.doEmote(20); _emotes.SetEmote(a); }
+                    if (_emotes.CanDoEmote(buddy)) { buddy.doEmote(20); _emotes.SetEmote(buddy); }
                 }
-            }, 1000);
+            }, 900);
 
             return true;
         }

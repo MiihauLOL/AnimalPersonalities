@@ -1,161 +1,246 @@
 ﻿using AnimalPersonalities.Services;
 using Microsoft.Xna.Framework;
 using StardewValley;
-using StardewValley.Characters;
 using StardewValley.Objects;
-using StardewValley.Pathfinding;
+using StardewModdingAPI;
 using System;
 using System.Collections.Generic;
 
 namespace AnimalPersonalities.Handlers
 {
+    // Mischievous: pick at most one feasible action per check.
     public class MischievousHandler : IAnimalPersonalityHandler
     {
-        private readonly TileService Tiles;
-        public MischievousHandler(TileService tiles) => Tiles = tiles;
+        private readonly TileService _tiles;
+        private readonly IMonitor _monitor;
+        private readonly HopArcService _hopArc;
+
+        // tweakable odds
+        private const double GatePrankChance = 0.01;  // 1%
+        private const double DoorPrankChance = 0.01;  // 1%
+        private const double FenceHopChance = 0.01;   // 1%
+
+        public MischievousHandler(TileService tiles, IMonitor monitor, HopArcService hopArc)
+        { _tiles = tiles; _monitor = monitor; _hopArc = hopArc; }
+
+        // per-animal anti-spam
+        private readonly Dictionary<long, int> _cooldown = new();
+        private static bool CooldownOK(Dictionary<long, int> cd, long id, int minTicks)
+        {
+            int now = Game1.ticks;
+            if (cd.TryGetValue(id, out var last) && now - last < minTicks) return false;
+            cd[id] = now; return true;
+        }
 
         public List<Func<bool>> BuildFeasibleActions(FarmAnimal a, AIContext ctx)
         {
-            var list = new List<Func<bool>>();
+            var actions = new List<Func<bool>>();
+
+            var loc = a.currentLocation;
+            if (loc?.IsOutdoors != true) return actions;
+
             a.speed = 2;
 
-            var farm = ctx.Farm;
-            Vector2 pos = a.TilePoint.ToVector2();
+            // figure out what we *could* do; ModEntry will roll one
+            var tile = a.TilePoint.ToVector2();
+            bool nearGate = HasNearbyGate(loc, tile, 2, out var gateTile);
+            bool nearDoor = IsNearAnimalDoor(a, out var doorTile, out _);
+            bool adjFence = HasAdjacentFence(loc, tile, out var _, out var _);
 
-            // gate nearby?
-            bool nearGate = false;
-            for (int x = -2; x <= 2 && !nearGate; x++)
-                for (int y = -2; y <= 2 && !nearGate; y++)
-                {
-                    Vector2 t = pos + new Vector2(x, y);
-                    if (farm.objects.TryGetValue(t, out var o) && o is Fence) nearGate = true;
-                }
-            if (nearGate) list.Add(() => TryGatePrank(a, ctx));
+            if (nearGate) actions.Add(() => TryGatePrank(a, ctx, gateTile));
+            if (nearDoor) actions.Add(() => TryDoorPrank(a, ctx, doorTile));
+            if (adjFence) actions.Add(() => TryFenceHop(a, ctx));
 
-            // near own door?
-            bool nearDoor = false;
-            if (a.home != null)
-            {
-                var d = a.home.animalDoor.Value;
-                var doorTile = new Vector2(d.X, d.Y);
-                nearDoor = Vector2.Distance(pos, doorTile) <= 8f;
-            }
-            if (nearDoor) list.Add(() => TryDoorPrank(a, ctx));
-
-            // adjacent fence to hop?
-            bool adjacentFence = false;
-            for (int ox = -1; ox <= 1 && !adjacentFence; ox++)
-                for (int oy = -1; oy <= 1 && !adjacentFence; oy++)
-                {
-                    if (ox == 0 && oy == 0) continue;
-                    Vector2 t = pos + new Vector2(ox, oy);
-                    if (farm.objects.TryGetValue(t, out var o) && o is Fence) adjacentFence = true;
-                }
-            if (adjacentFence) list.Add(() => TryFenceHop(a, ctx));
-
-            return list;
+            return actions;
         }
 
-        private bool TryGatePrank(FarmAnimal a, AIContext ctx)
+        // scan a small radius for a gate
+        private bool HasNearbyGate(GameLocation loc, Vector2 centerTile, int r, out Vector2 gateTile)
         {
-            if (ctx.Rng.NextDouble() >= 0.01) return false;
-            var farm = ctx.Farm;
-            Vector2 pos = a.TilePoint.ToVector2();
-
-            for (int x = -2; x <= 2; x++)
-                for (int y = -2; y <= 2; y++)
+            for (int dx = -r; dx <= r; dx++)
+                for (int dy = -r; dy <= r; dy++)
                 {
-                    Vector2 t = pos + new Vector2(x, y);
-                    if (farm.objects.TryGetValue(t, out var o) && o is Fence fence)
-                    {
-                        fence.gatePosition.Value = fence.gatePosition.Value == 0 ? 88 : 0;
-                        a.doEmote(8);
-                        StardewValley.Game1.playSound("doorCreak");
-                        StardewValley.Game1.showGlobalMessage($"{a.displayName} messed with a gate!");
-                        return true;
-                    }
+                    Vector2 t = centerTile + new Vector2(dx, dy);
+                    if (loc.objects.TryGetValue(t, out var obj) && obj is Fence f && f.isGate.Value)
+                    { gateTile = t; return true; }
                 }
+            gateTile = default; return false;
+        }
+
+        // orthogonal fences only; land exactly two tiles past the fence
+        private bool HasAdjacentFence(GameLocation loc, Vector2 centerTile, out Vector2 fenceTile, out Vector2 hopTarget)
+        {
+            Vector2[] dirs = new[]
+            {
+                new Vector2( 1, 0),
+                new Vector2(-1, 0),
+                new Vector2( 0, 1),
+                new Vector2( 0,-1)
+            };
+
+            foreach (var d in dirs)
+            {
+                var fTile = centerTile + d;
+                if (loc.objects.TryGetValue(fTile, out var obj) && obj is Fence)
+                {
+                    fenceTile = fTile;
+                    hopTarget = centerTile + d * 2f;
+                    return true;
+                }
+            }
+
+            fenceTile = default; hopTarget = default; return false;
+        }
+
+        // door tile = building origin + door offset; check door + 4 neighbors
+        private bool IsNearAnimalDoor(FarmAnimal a, out Vector2 doorTile, out float minDistTiles, float radiusTiles = 6f)
+        {
+            doorTile = default; minDistTiles = float.NaN;
+
+            var home = a.home; var loc = a.currentLocation;
+            if (home == null || loc == null || !loc.IsOutdoors) return false;
+            if (home.GetParentLocation() != loc) return false;
+
+            int absDoorX = home.tileX.Value + home.animalDoor.X;
+            int absDoorY = home.tileY.Value + home.animalDoor.Y;
+            Vector2 baseDoor = new(absDoorX, absDoorY);
+
+            Vector2 aTile = a.TilePoint.ToVector2();
+            Vector2[] candidates = new[]
+            {
+                baseDoor,
+                baseDoor + new Vector2( 0,  1),
+                baseDoor + new Vector2( 0, -1),
+                baseDoor + new Vector2( 1,  0),
+                baseDoor + new Vector2(-1,  0),
+            };
+
+            float best = float.MaxValue;
+            Vector2 bestTile = baseDoor;
+            foreach (var c in candidates)
+            {
+                float d = Vector2.Distance(aTile, c);
+                if (d < best) { best = d; bestTile = c; }
+            }
+
+            doorTile = bestTile;
+            minDistTiles = best;
+            return best <= radiusTiles;
+        }
+
+        private bool TryGatePrank(FarmAnimal a, AIContext ctx, Vector2 hintGateTile)
+        {
+            if (!CooldownOK(_cooldown, a.myID.Value, 600)) return false;
+            if (ctx.Rng.NextDouble() >= GatePrankChance) return false;
+
+            var loc = a.currentLocation;
+            if (loc.objects.TryGetValue(hintGateTile, out var obj) && obj is Fence f && f.isGate.Value)
+            {
+                ToggleGate(f);
+                EmoteOnScreen(a, 8);
+                PlaySoundIfOnScreen(loc, TileToWorld(hintGateTile), "doorCreak");
+                return true;
+            }
             return false;
         }
 
-        private bool TryDoorPrank(FarmAnimal a, AIContext ctx)
+        // toggle barn door and revert; use the door rect for world sound
+        private bool TryDoorPrank(FarmAnimal a, AIContext ctx, Vector2 doorTile)
         {
+            if (!CooldownOK(_cooldown, a.myID.Value, 900)) return false;
+            if (ctx.Rng.NextDouble() >= DoorPrankChance) return false;
             if (a.home == null) return false;
-            if (ctx.Rng.NextDouble() >= 0.01) return false;
 
-            var building = a.home;
-            bool original = building.animalDoorOpen.Value;
+            bool original = a.home.animalDoorOpen.Value;
+            a.home.animalDoorOpen.Value = !original;
 
-            building.animalDoorOpen.Value = !original;
-            StardewValley.Game1.playSound("doorCreak");
-            a.doEmote(16);
-            StardewValley.Game1.showGlobalMessage($"{a.displayName} nudged the barn door!");
+            var rect = a.home.getRectForAnimalDoor();
+            Vector2 doorWorld = new(rect.Center.X, rect.Center.Y);
+
+            EmoteOnScreen(a, 16);
+            PlaySoundIfOnScreen(a.currentLocation, doorWorld, "doorCreak");
 
             DelayedAction.functionAfterDelay(() =>
             {
-                building.animalDoorOpen.Value = original;
-                StardewValley.Game1.playSound("doorCreak");
-                a.doEmote(8);
-                StardewValley.Game1.showGlobalMessage($"{a.displayName} put the door back like nothing happened...");
+                a.home.animalDoorOpen.Value = original;
+                PlaySoundIfOnScreen(a.currentLocation, doorWorld, "doorCreak");
+                EmoteOnScreen(a, 8);
             }, 2000);
 
             return true;
         }
 
+        // hop across one fence; real hop + arc
         private bool TryFenceHop(FarmAnimal a, AIContext ctx)
         {
-            if (ctx.Rng.NextDouble() >= 0.003) return false;
+            if (!CooldownOK(_cooldown, a.myID.Value, 900)) return false;
+            if (ctx.Rng.NextDouble() >= FenceHopChance) return false;
 
-            var farm = ctx.Farm;
-            Vector2 pos = a.TilePoint.ToVector2();
+            var loc = a.currentLocation;
+            var pos = a.TilePoint.ToVector2();
 
-            for (int ox = -1; ox <= 1; ox++)
-                for (int oy = -1; oy <= 1; oy++)
-                {
-                    if (ox == 0 && oy == 0) continue;
+            if (!HasAdjacentFence(loc, pos, out var _, out var hopTarget)) return false;
+            if (!_tiles.IsClearTile(loc, hopTarget)) return false;
 
-                    Vector2 fenceTile = pos + new Vector2(ox, oy);
-                    if (farm.objects.TryGetValue(fenceTile, out var o) && o is Fence)
-                    {
-                        Vector2 hopTarget = fenceTile + new Vector2(System.Math.Sign(ox), System.Math.Sign(oy));
-                        if (!Tiles.IsClearTile(farm, hopTarget)) continue;
+            EmoteOnScreen(a, 16);
+            PlaySoundIfOnScreen(loc, a.Position, "dwop");
+            StartHop(a, pos, hopTarget, loc);
+            return true;
+        }
 
-                        // visual hop
-                        a.doEmote(16);
-                        StardewValley.Game1.playSound("dwop");
+        private static void ToggleGate(Fence fence)
+        {
+            fence.gatePosition.Value = fence.gatePosition.Value == 0 ? 88 : 0;
+        }
 
-                        float jumpHeight = 60f + (float)ctx.Rng.NextDouble() * 30f;
-                        float jumpDuration = 500f;
+        // vanilla hop moves ~4px/update @ ~60fps; convert to ms
+        private static int EstimateHopDurationMs(Vector2 worldDelta)
+        {
+            float px = Math.Max(Math.Abs(worldDelta.X), Math.Abs(worldDelta.Y));
+            return (int)Math.Ceiling((px / 4f) * (1000f / 60f));
+        }
 
-                        DelayedAction.functionAfterDelay(() =>
-                        {
-                            a.setTileLocation(hopTarget);
-                            StardewValley.Game1.playSound("thudStep");
-                        }, (int)(jumpDuration / 2));
+        private void StartHop(FarmAnimal a, Vector2 fromTile, Vector2 toTile, GameLocation loc)
+        {
+            Vector2 deltaTiles = toTile - fromTile;
+            Vector2 worldDelta = deltaTiles * 64f;
 
-                        StardewValley.Game1.delayedActions.Add(new DelayedAction(0, () =>
-                        {
-                            a.yJumpOffset = 0;
-                            a.yJumpVelocity = -jumpHeight / 100f;
+            // face hop direction
+            int dir;
+            if (Math.Abs(deltaTiles.X) >= Math.Abs(deltaTiles.Y)) dir = deltaTiles.X >= 0 ? 1 : 3;
+            else dir = deltaTiles.Y >= 0 ? 2 : 0;
+            a.faceDirection(dir);
 
-                            DelayedAction.functionAfterDelay(() =>
-                            {
-                                a.yJumpVelocity = jumpHeight / 100f;
-                            }, (int)(jumpDuration / 2));
+            a.controller = null;
+            a.Halt();
+            a.hopOffset = worldDelta; // slide is handled by vanilla
 
-                            DelayedAction.functionAfterDelay(() =>
-                            {
-                                a.yJumpOffset = 0;
-                                a.yJumpVelocity = 0;
-                                a.doEmote(8);
-                                StardewValley.Game1.showGlobalMessage($"{a.displayName} hopped the fence!");
-                            }, (int)jumpDuration);
-                        }));
+            int ms = EstimateHopDurationMs(worldDelta);
+            _hopArc.Start(a, ms, peak: 30); // per-tick arc
 
-                        return true;
-                    }
-                }
-            return false;
+            DelayedAction.functionAfterDelay(() =>
+            {
+                if (a == null) return;
+                a.setTileLocation(toTile);
+                a.yJumpOffset = 0;
+                PlaySoundIfOnScreen(loc, TileToWorld(toTile), "thudStep");
+                EmoteOnScreen(a, 8);
+            }, ms + 30);
+        }
+
+        private static Vector2 TileToWorld(Vector2 tile) => tile * 64f + new Vector2(32f, 32f);
+
+        // screen-gated fx
+        private static void PlaySoundIfOnScreen(GameLocation loc, Vector2 worldPos, string cue)
+        {
+            if (loc == Game1.currentLocation && Utility.isOnScreen(worldPos, 64))
+                loc.localSound(cue);
+        }
+
+        private static void EmoteOnScreen(FarmAnimal a, int emote)
+        {
+            if (a.currentLocation == Game1.currentLocation && Utility.isOnScreen(a.Position, 128))
+                a.doEmote(emote);
         }
     }
 }

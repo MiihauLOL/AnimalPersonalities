@@ -1,7 +1,6 @@
 ﻿using AnimalPersonalities.Services;
 using Microsoft.Xna.Framework;
 using StardewValley;
-using StardewValley.Characters;
 using StardewValley.Pathfinding;
 using System;
 using System.Collections.Generic;
@@ -10,37 +9,69 @@ namespace AnimalPersonalities.Handlers
 {
     public class EnergeticHandler : IAnimalPersonalityHandler
     {
-        public List<Func<bool>> BuildFeasibleActions(FarmAnimal a, AIContext ctx)
+        // tiny anti-spam so they don't burst every tick
+        private readonly Dictionary<long, int> _cooldown = new();
+        private static bool CooldownOK(Dictionary<long, int> cd, long id, int minTicks)
         {
-            var list = new List<Func<bool>>();
-            a.speed = 3;
-            bool timeOk = StardewValley.Game1.timeOfDay < 2300;
-
-            if (!timeOk) return list;
-
-            Vector2 pos = a.TilePoint.ToVector2();
-            Vector2 burstTarget = pos + new Vector2(ctx.Rng.Next(-4, 5), ctx.Rng.Next(-4, 5));
-            list.Add(() => TryBurst(a, burstTarget, ctx));
-
-            Vector2 exploreTarget = StardewValley.Utility.getRandomAdjacentOpenTile(pos, ctx.Farm);
-            if (exploreTarget != Vector2.Zero)
-                list.Add(() => TryExplore(a, exploreTarget, ctx));
-
-            return list;
+            int now = Game1.ticks;
+            if (cd.TryGetValue(id, out var last) && now - last < minTicks) return false;
+            cd[id] = now; return true;
         }
 
-        private bool TryBurst(FarmAnimal a, Vector2 target, AIContext ctx)
+        public List<Func<bool>> BuildFeasibleActions(FarmAnimal a, AIContext ctx)
         {
-            if (ctx.Rng.NextDouble() >= 0.7) return false;
-            a.controller = new PathFindController(a, a.currentLocation, target.ToPoint(), 2);
-            a.doEmote(20);
+            var actions = new List<Func<bool>>();
+            if (Game1.timeOfDay >= 2330) return actions; // sleep a bit later, but not too late
+
+            // explore (outdoors, can pick a reachable tile)
+            if (a.currentLocation?.IsOutdoors == true)
+            {
+                actions.Add(() => TryExplore(a, ctx));
+                actions.Add(() => TryBurst(a, ctx)); // run fast OR explore — one action will be chosen by the caller
+            }
+
+            return actions;
+        }
+
+        private bool TryBurst(FarmAnimal a, AIContext ctx)
+        {
+            if (!CooldownOK(_cooldown, a.myID.Value, 420)) return false; // ~7s
+            if (ctx.Rng.NextDouble() >= 0.65) return false;
+
+            a.speed = Math.Max(a.speed, 4);
+            var here = a.TilePoint.ToVector2();
+            var target = here + new Vector2(ctx.Rng.Next(-5, 6), ctx.Rng.Next(-5, 6));
+
+            if (FarmAnimal.NumPathfindingThisTick < FarmAnimal.MaxPathfindingPerTick)
+            {
+                FarmAnimal.NumPathfindingThisTick++;
+                a.controller = new PathFindController(a, a.currentLocation, target.ToPoint(), 2);
+            }
+
+            // happy emote on burst (on screen only)
+            if (a.currentLocation == Game1.currentLocation && Utility.isOnScreen(a.Position, 128))
+                a.doEmote(20);
+
+            DelayedAction.functionAfterDelay(() =>
+            {
+                if (a != null) a.speed = 2;
+            }, 1200);
             return true;
         }
 
-        private bool TryExplore(FarmAnimal a, Vector2 target, AIContext ctx)
+        private bool TryExplore(FarmAnimal a, AIContext ctx)
         {
-            if (ctx.Rng.NextDouble() >= 0.7) return false;
-            a.controller = new PathFindController(a, a.currentLocation, target.ToPoint(), 2);
+            if (!CooldownOK(_cooldown, a.myID.Value, 420)) return false; // ~7s
+            if (ctx.Rng.NextDouble() >= 0.65) return false;
+
+            var here = a.TilePoint.ToVector2();
+            var target = here + new Vector2(ctx.Rng.Next(-8, 9), ctx.Rng.Next(-8, 9));
+
+            if (FarmAnimal.NumPathfindingThisTick < FarmAnimal.MaxPathfindingPerTick)
+            {
+                FarmAnimal.NumPathfindingThisTick++;
+                a.controller = new PathFindController(a, a.currentLocation, target.ToPoint(), 2);
+            }
             return true;
         }
     }
