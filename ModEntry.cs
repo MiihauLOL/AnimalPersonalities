@@ -71,6 +71,8 @@ namespace AnimalPersonalities
 
             if (!finishedPurchaseOrNaming) return;
 
+            bool temp = false;
+            if (Game1.player.professions.Contains(Farmer.shepherd) || Game1.player.professions.Contains(Farmer.butcher)) temp = true;
             // Assign personality right after the game actually adds the animal.
             DelayedAction.functionAfterDelay(() =>
             {
@@ -78,7 +80,7 @@ namespace AnimalPersonalities
                 {
                     if (b.indoors.Value is not AnimalHouse house) continue;
                     foreach (var a in house.animals.Values)
-                        Assigner.AssignIfMissing(a, Rng, PersonalityKey, Monitor, toast: true);
+                        Assigner.AssignIfMissing(a, Rng, PersonalityKey, Monitor, toast: temp);
                 }
             }, 1000);
         }
